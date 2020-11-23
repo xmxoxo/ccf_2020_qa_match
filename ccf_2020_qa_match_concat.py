@@ -1,15 +1,14 @@
-# -*- coding: utf-8 -*-
-# @Date    : 2020/11/3
-# @Author  : mingming.xu
-# @Email   : xv44586@gmail.com
-# @File    : ccf_2020_qa_match_pair.py
+#!/usr/bin/env python
+# -*- coding: utf8 -*-
+# @Date     : 2020/11/12
+# @Author   : mingming.xu
+# @Email    : xv44586@gmail.com
 """
-拆成query-pair 对，然后分类
-线上f1:0.752
+bert每层捕获的信息不同，代表的语义粒度也不同，将不同粒度的信息拼接起来，然后送进CNN后做分类。
+ret:
+  https://arxiv.org/pdf/2008.06460.pdf
+"""
 
-tips:
-  切换模型时，修改对应config_path/checkpoint_path/dict_path路径以及build_transformer_model 内的参数
-"""
 import os
 from tqdm import tqdm
 import numpy as np
@@ -106,31 +105,34 @@ bert = build_transformer_model(
     # model='electra', # 加载electra
     model='nezha',  # 加载NEZHA
 )
-output = bert.output
+inputs = bert.inputs
 
-output = Dropout(0.5)(output)
+outputs = []
+x = bert.apply_embeddings(inputs)
 
-att = AttentionPooling1D(name='attention_pooling_1')(output)
+for idx in range(bert.num_hidden_layers):
+    x = bert.apply_transformer_layers(x, idx)
+    output = Lambda(lambda x: x[:, 0:1])(x)
+    outputs.append(output)
 
-output = ConcatSeq2Vec()([output, att])
+output = Concatenate(1)(outputs)
+
 output = DGCNN(dilation_rate=1, dropout_rate=0.1)(output)
 output = DGCNN(dilation_rate=2, dropout_rate=0.1)(output)
-output = DGCNN(dilation_rate=5, dropout_rate=0.1)(output)
-output = Lambda(lambda x: x[:, 0])(output)
+output = DGCNN(dilation_rate=2, dropout_rate=0.1)(output)
+output = DGCNN(dilation_rate=1, dropout_rate=0.1)(output)
+
+output = AttentionPooling1D()(output)
+output = Dropout(0.5)(output)
 output = Dense(1, activation='sigmoid')(output)
 
-model = keras.models.Model(bert.input, output)
+model = keras.models.Model(inputs, output)
 model.summary()
 
 model.compile(
+    #     loss=binary_focal_loss(0.25, 12), # focal loss
     loss=K.binary_crossentropy,
     optimizer=Adam(2e-5),
-    metrics=['accuracy'],
-)
-
-model.compile(
-    loss=K.binary_crossentropy,
-    optimizer=Adam(2e-5),  # 用足够小的学习率
     metrics=['accuracy'],
 )
 
@@ -164,14 +166,14 @@ class Evaluator(keras.callbacks.Callback):
         val_f1 = evaluate(valid_generator)
         if val_f1 > self.best_val_f1:
             self.best_val_f1 = val_f1
-            model.save_weights('best_parimatch_model.weights')
+            model.save_weights('best_concat_model.weights')
         print(
             u'val_f1: %.5f, best_val_f1: %.5f\n' %
             (val_f1, self.best_val_f1)
         )
 
 
-def predict_to_file(path='pair_submission.tsv', data=test_generator):
+def predict_to_file(path='concat_submission.tsv', data=test_generator):
     preds = []
     for x, _ in tqdm(test_generator):
         pred = model.predict(x)[:, 0]
@@ -199,5 +201,5 @@ if __name__ == '__main__':
     )
 
     # predict test and write to file
-    model.load_weights('best_parimatch_model.weights')
+    model.load_weights('best_concat_model.weights')
     predict_to_file()
